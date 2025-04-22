@@ -1,6 +1,6 @@
-# Alai Challenge - Backend - Webpage to Presentation Generator
+# Webpage to AI Presentation Generator
 
-This project is a solution to the Alai Backend Challenge, designed to take any webpage URL as input and generate a shareable Alai presentation link. The script scrapes content using the Firecrawl API, processes it with Alai's undocumented API (reverse-engineered via Chrome's network tab), and outputs a professional 5-slide presentation. For extra credit, I enhanced the presentation quality with detailed slide instructions (e.g., structured title, content, and conclusion slides with a business tone) and imported images from the webpage, placing one per slide at 1/4th size for a polished look.
+This project is an initiative to create a tool that converts any webpage URL into a shareable presentation link using Alai's platform. The tool leverages the Firecrawl API to scrape webpage content and processes it through Alai's undocumented API (reverse-engineered via Chrome's network tab) to generate a professional 5-slide presentation. To optimize the output, I designed a structured slide schema, comprising a title slide with a concise headline, content slides with hierarchically organized text extracted from the webpage, and a conclusion slide summarizing key points, all styled with a professional business tone. Additionally, I implemented an image extraction and resizing pipeline, selecting one relevant image per slide from the webpage, and embedding it to enhance visual coherence and presentation polish.
 
 ## Setup
 
