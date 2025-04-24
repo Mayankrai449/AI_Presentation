@@ -2,6 +2,10 @@
 
 This project is an initiative to create a tool that converts any webpage URL into a shareable presentation link using Alai's platform. The tool leverages the Firecrawl API to scrape webpage content and processes it through Alai's undocumented API (reverse-engineered via Chrome's network tab) to generate a professional 5-slide presentation. To optimize the output, I designed a structured slide schema, comprising a title slide with a concise headline, content slides with hierarchically organized text extracted from the webpage, and a conclusion slide summarizing key points, all styled with a professional business tone. Additionally, I implemented an image extraction and resizing pipeline, selecting one relevant image per slide from the webpage, and embedding it to enhance visual coherence and presentation polish.
 
+![pptx](images/ppt2.png) 
+
+![pptx](images/ppt1.png)
+
 ## Setup
 
 ### 1. Clone the Repository

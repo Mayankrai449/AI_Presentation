@@ -3,12 +3,12 @@ import json
 import uuid
 import websocket
 import base64
-import random
 import ssl
 import argparse
 import logging
 from datetime import datetime
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urljoin
 import re
 from bs4 import BeautifulSoup
@@ -30,8 +30,8 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 AUTH_TOKEN = None
-BASE_API_URL = "https://alai-standalone-backend.getalai.com"
-AUTH_URL = "https://api.getalai.com/auth/v1/token?grant_type=password"
+BASE_API_URL = os.getenv('BASE_API_URL')
+AUTH_URL = os.getenv('AUTH_URL')
 PRESENTATION_ID = None
 SLIDE_ID = None
 API_KEY = os.getenv('ALAI_API_KEY')
@@ -47,11 +47,12 @@ def configure_argparse():
     return parser.parse_args()
 
 def scrape_webpage(target_url, api_token):
-    """Scrape webpage content using Firecrawl API"""
-    firecrawl_url = "https://api.firecrawl.dev/v1/scrape"
+    firecrawl_url = os.getenv('FIRE_CRAWL_URL')
+    safe_name = target_url.replace("https://", "").replace("http://", "").replace("/", "_")
+    url_dir = os.path.join("scraped_data", safe_name)
+    image_dir = os.path.join(url_dir, "images")
 
-    os.makedirs("scraped_data", exist_ok=True)
-    os.makedirs("scraped_data/images", exist_ok=True)
+    os.makedirs(image_dir, exist_ok=True)
 
     payload = {
         "url": target_url,
@@ -67,40 +68,54 @@ def scrape_webpage(target_url, api_token):
     }
 
     def save_image(image_data, extension, index):
-        """Helper function to save image with proper format validation"""
         try:
             img = Image.open(io.BytesIO(image_data))
-            
+
             if img.mode in ('RGBA', 'LA', 'P'):
                 img = img.convert('RGB')
-            
-            if extension.lower() in ['.jpg', '.jpeg']:
-                format = 'JPEG'
-                ext = '.jpg'
-            elif extension.lower() == '.png':
-                format = 'PNG'
-                ext = '.png'
-            elif extension.lower() == '.gif':
-                format = 'GIF'
-                ext = '.gif'
-            elif extension.lower() == '.webp':
-                format = 'WEBP'
-                ext = '.webp'
-            else:
-                format = 'JPEG'
-                ext = '.jpg'
-            
-            img_filename = f"scraped_data/images/img{index}{ext}"
-            img.save(img_filename, format=format)
+
+            ext_map = {
+                '.jpg': 'JPEG',
+                '.jpeg': 'JPEG',
+                '.png': 'PNG',
+                '.gif': 'GIF',
+                '.webp': 'WEBP'
+            }
+
+            ext = extension.lower() if extension.lower() in ext_map else '.jpg'
+            fmt = ext_map.get(ext, 'JPEG')
+
+            img_filename = os.path.join(image_dir, f"img{index}{ext}")
+            img.save(img_filename, format=fmt)
             logger.info(f"Saved image to {img_filename}")
             return True
-            
+
         except Exception as e:
             logger.error(f"Failed to process image: {str(e)}")
             return False
 
+    def clean_markdown(md):
+        md = re.sub(r'!\[.*?\]\(\s*[\|\s]*\)', '', md)
+        md = re.sub(r'!\[.*?\]\(.*?\)', '', md)
+        md = re.sub(r'\[([^\]]+)\]\((.*?)\)', r'\1', md)
+        md = re.sub(r'http[s]?://\S+', '', md)
+        md = re.sub(r'^\s*\|.*?\|\s*$', '', md, flags=re.MULTILINE)
+        md = re.sub(r'^\s*:?[-| ]+:?\s*$', '', md, flags=re.MULTILINE)
+        md = re.sub(r'^#{1,6}\s+', '', md, flags=re.MULTILINE)
+        md = re.sub(r'^[-*_]{3,}\s*$', '', md, flags=re.MULTILINE)
+        md = re.sub(r'(\*\*|__)(.*?)\1', r'\2', md)
+        md = re.sub(r'(\*|_)(.*?)\1', r'\2', md)
+        md = re.sub(r'`{1,3}(.*?)`{1,3}', r'\1', md)
+        md = re.sub(r'^\s*[-*+]\s+', '', md, flags=re.MULTILINE)
+        md = re.sub(r'\n{3,}', '\n\n', md)
+        md = re.sub(r'[ \t]+', ' ', md)
+        md = re.sub(r'\n\s*\n', '\n\n', md)
+
+        return md.strip()
+
+
     try:
-        if not api_token or api_token == "your_api_token_here":
+        if not api_token:
             raise ValueError("Please provide a valid API token")
         if not target_url.startswith("http"):
             raise ValueError("URL must start with http:// or https://")
@@ -113,88 +128,64 @@ def scrape_webpage(target_url, api_token):
         clean_text = ""
         if "data" in result and "markdown" in result["data"]:
             markdown_content = result["data"]["markdown"]
+            clean_text = clean_markdown(markdown_content)
 
-            clean_text = markdown_content
-            clean_text = re.sub(r'!\[.*?\]\(.*?\)', '', clean_text)
-            clean_text = re.sub(r'\[([^\]]+)\]\((.*?)\)', r'\1', clean_text)
-            clean_text = re.sub(r'http[s]?://\S+', '', clean_text)
-            clean_text = re.sub(r'^#+\s+', '', clean_text, flags=re.MULTILINE)
-            clean_text = re.sub(r'(\*\*|__)(.*?)\1', r'\2', clean_text)
-            clean_text = re.sub(r'(\*|_)(.*?)\1', r'\2', clean_text)
-            clean_text = re.sub(r'`{1,3}(.*?)`{1,3}', r'\1', clean_text)
-            clean_text = re.sub(r'\|.*\|', '', clean_text)
-            clean_text = re.sub(r'^\s*[-*+]\s+', '', clean_text, flags=re.MULTILINE)
-            clean_text = re.sub(r'^-{3,}|_{3,}|\*{3,}', '', clean_text, flags=re.MULTILINE)
-            clean_text = re.sub(r'\n{3,}', '\n\n', clean_text)
-            clean_text = re.sub(r'[ \t]+', ' ', clean_text)
-            clean_text = clean_text.strip()
-
-            safe_filename = target_url.replace('https://', '').replace('http://', '').replace('/', '_')
-            text_filename = f"scraped_data/{safe_filename}.txt"
-            
+            text_filename = os.path.join(url_dir, "content.txt")
             with open(text_filename, 'w', encoding='utf-8') as f:
                 f.write(clean_text)
-
             logger.info(f"Saved clean text to {text_filename}")
         else:
             logger.warning("No markdown content found in the scraped result.")
 
-        if "data" in result and "html" in result["data"]:
-            html_content = result["data"]["html"]
-            soup = BeautifulSoup(html_content, 'html.parser')
-            
-            img_tags = soup.find_all('img', src=True)
-            downloaded = 0
-            
-            for i, img in enumerate(img_tags):
-                if downloaded >= 10:
-                    break
-                
-                img_src = img['src']
-                
+        downloaded = 0
+        img_tags = []
+
+        def download_and_save(i, img):
+            nonlocal downloaded
+            img_src = img['src']
+            try:
                 if img_src.startswith('data:image'):
-                    try:
-                        img_format = img_src.split(';')[0].split('/')[1]
-                        img_data = img_src.split(',')[1]
-                        
-                        ext_map = {
-                            'jpeg': '.jpg',
-                            'jpg': '.jpg',
-                            'png': '.png',
-                            'gif': '.gif',
-                            'webp': '.webp'
-                        }
-                        ext = ext_map.get(img_format.lower(), '.jpg')
-                        
-                        decoded_img = base64.b64decode(img_data)
-                        
-                        if save_image(decoded_img, ext, downloaded+1):
-                            downloaded += 1
-                            
-                    except Exception as e:
-                        logger.error(f"Failed to save base64 image: {str(e)}")
+                    img_format = img_src.split(';')[0].split('/')[1]
+                    ext_map = {
+                        'jpeg': '.jpg',
+                        'jpg': '.jpg',
+                        'png': '.png',
+                        'gif': '.gif',
+                        'webp': '.webp'
+                    }
+                    ext = ext_map.get(img_format.lower(), '.jpg')
+                    img_data = base64.b64decode(img_src.split(',')[1])
+                    return save_image(img_data, ext, i)
                 else:
-                    try:
-                        img_url = urljoin(target_url, img_src)
-                        img_ext = os.path.splitext(img_url.split('?')[0])[1].lower()
-                        if not img_ext or img_ext not in ['.jpg', '.jpeg', '.png', '.gif', '.webp']:
-                            img_ext = '.jpg'
-                        
-                        img_response = requests.get(img_url, timeout=10)
-                        img_response.raise_for_status()
-                        
-                        if save_image(img_response.content, img_ext, downloaded+1):
-                            downloaded += 1
-                            
-                    except Exception as e:
-                        logger.error(f"Failed to download image {img_src}: {str(e)}")
-        
+                    img_url = urljoin(target_url, img_src)
+                    img_ext = os.path.splitext(img_url.split('?')[0])[1].lower()
+                    if img_ext not in ['.jpg', '.jpeg', '.png', '.gif', '.webp']:
+                        img_ext = '.jpg'
+                    img_response = requests.get(img_url, timeout=10, headers={
+                        "User-Agent": "MayankBot/1.0 (+https://github.com/mayankrai449)"
+                    })
+                    img_response.raise_for_status()
+                    return save_image(img_response.content, img_ext, i)
+            except Exception as e:
+                logger.error(f"Failed to download or save image: {str(e)}")
+                return False
+
+        if "data" in result and "html" in result["data"]:
+            soup = BeautifulSoup(result["data"]["html"], 'html.parser')
+            img_tags = soup.find_all('img', src=True)[:10]
+
+            with ThreadPoolExecutor(max_workers=10) as executor:
+                futures = {executor.submit(download_and_save, i + 1, img): i for i, img in enumerate(img_tags)}
+                for future in as_completed(futures):
+                    if future.result():
+                        downloaded += 1
+
         if not img_tags or downloaded == 0:
             logger.warning("No images found in the scraped result.")
-            with open("scraped_data/images/.no_images_found", 'w') as f:
+            with open(os.path.join(image_dir, ".no_images_found"), 'w') as f:
                 f.write(f"No images found for {target_url}")
 
-        return clean_text
+        return clean_text, url_dir
 
     except requests.exceptions.HTTPError as e:
         error_msg = f"HTTP Error {e.response.status_code}: {e.response.text}"
@@ -240,6 +231,44 @@ def add_response(step_name, response_data, success=True, error=None):
     ALL_RESPONSES.append(response_entry)
     return response_entry
 
+def save_token(token):
+    with open("auth_token.txt", "w") as f:
+        f.write(token)
+
+def load_token():
+    if os.path.exists("auth_token.txt"):
+        with open("auth_token.txt", "r") as f:
+            return f.read().strip()
+    return None
+
+def authenticated(access_token):
+    """Check if the user is authenticated"""
+
+    headers = {
+        "ApiKey": f"{API_KEY}",
+        "Authorization": f"Bearer {access_token}"
+    }
+
+    try:
+        response = requests.get(f"{AUTH_URL}/user", headers=headers)
+        response_data = response.json() if response.content else {}
+        if response.status_code == 200:
+            if response_data["aud"] == "authenticated":
+                logger.info("User is authenticated!")
+                return True
+            else:
+                logger.warning("User is not authenticated!")
+                return False
+        else:
+            error_msg = f"Status {response.status_code}: {response.text}"
+            logger.error(f"Authentication check failed: {error_msg}")
+            add_response("authenticated_check", response_data, False, error_msg)
+            return False
+        
+    except Exception as e:
+        logger.error(f"Error checking authentication: {str(e)}")
+        return False
+
 def authenticate():
     """Authenticate to Alai API and get access token"""
     global AUTH_TOKEN
@@ -258,11 +287,12 @@ def authenticate():
     }
     
     try:
-        response = requests.post(AUTH_URL, headers=headers, json=data)
+        response = requests.post(f"{AUTH_URL}//token?grant_type=password", headers=headers, json=data)
         response_data = response.json() if response.content else {}
         
         if response.status_code == 200:
             AUTH_TOKEN = response_data.get("access_token")
+            save_token(AUTH_TOKEN)
             logger.info("Authentication successful")
             add_response("authentication", response_data)
             return True
@@ -314,7 +344,7 @@ def generate_unique_id(existing_ids):
         if new_id not in existing_ids:
             return new_id
 
-def create_new_presentation(content_data):
+def create_new_presentation():
     """Create a new presentation with generated ID"""
     global PRESENTATION_ID
     
@@ -420,19 +450,11 @@ def get_presentation_questions():
         add_response("get_presentation_questions", None, False, error_msg)
         return []
 
-def get_websocket_headers():
-    """Generate WebSocket headers with proper Sec-WebSocket-Key"""
-    key = base64.b64encode(bytes([random.randint(0, 255) for _ in range(16)])).decode('utf-8')
-    return []
-
-class CustomWebSocket(websocket.WebSocketApp):
-    def _get_custom_headers(self):
-        return get_websocket_headers()
 
 def generate_slides_outline(content_data, instructions):
     """Generate slide outlines using WebSocket connection"""
     global SLIDES_DATA
-    
+
     presentation_questions = get_presentation_questions()
     presentation_questions[0]["answer"] = "Professional Meeting"
     presentation_questions[1]["answer"] = "Business Executives who need detailed information"
@@ -443,7 +465,7 @@ def generate_slides_outline(content_data, instructions):
         "presentation_id": PRESENTATION_ID,
         "slide_order": 0,
         "raw_context": content_data,
-        "presentation_instructions": instructions+"Keep images null for all slides",
+        "presentation_instructions": instructions,
         "slide_range": "2-5",
         "presentation_questions": presentation_questions
     }
@@ -472,7 +494,7 @@ def generate_slides_outline(content_data, instructions):
         add_response("generate_slides_outline_error", None, False, str(error))
     
     logger.info("Generating slides outline via WebSocket")
-    ws = CustomWebSocket(
+    ws = websocket.WebSocketApp(
         "wss://alai-standalone-backend.getalai.com/ws/generate-slides-outline",
         on_open=on_open,
         on_message=on_message,
@@ -546,7 +568,7 @@ def create_slides_from_outlines(content_data, instructions):
         add_response("create_slides_from_outlines_error", None, False, str(error))
     
     logger.info("Creating slides from outlines via WebSocket")
-    ws = CustomWebSocket(
+    ws = websocket.WebSocketApp(
         "wss://alai-standalone-backend.getalai.com/ws/create-slides-from-outlines",
         on_open=on_open,
         on_message=on_message,
@@ -620,12 +642,9 @@ def upload_images_to_presentation(image_paths):
         logger.warning("No valid JPG images to upload")
         return None
 
-    files = []
-    data = {
-        'upload_input': json.dumps({
-            'presentation_id': PRESENTATION_ID
-        })
-    }
+    files = [
+        ('upload_input', (None, json.dumps({'presentation_id': PRESENTATION_ID}), 'application/json')),
+    ]
 
     for path in valid_images:
         file = open(path, 'rb')
@@ -637,7 +656,6 @@ def upload_images_to_presentation(image_paths):
         response = requests.post(
             f"{BASE_API_URL}/upload-images-for-slide-generation",
             headers=headers,
-            data=data,
             files=files
         )
         response_data = response.json() if response.content else {}
@@ -745,7 +763,7 @@ def create_and_stream_slide_variants(slide_data):
         add_response("create_and_stream_slide_variants_error", None, False, f"WebSocket error: {str(error)}")
 
     try:
-        ws = CustomWebSocket(
+        ws = websocket.WebSocketApp(
             "wss://alai-standalone-backend.getalai.com/ws/create-and-stream-slide-variants",
             on_open=on_open,
             on_message=on_message,
@@ -871,7 +889,10 @@ def process_slide_variants(slides_data):
 
 def generate_presentation(content_data, instructions="", image_paths=None):
     """Main function to orchestrate the entire presentation generation process"""
+    global AUTH_TOKEN
 
+    content_data = content_data[:19000]
+    
     add_response("start", {
         "content_data": content_data[:200] + "..." if len(content_data) > 200 else content_data,
         "instructions": instructions,
@@ -879,10 +900,16 @@ def generate_presentation(content_data, instructions="", image_paths=None):
     })
     
     try:
-        if not authenticate():
-            return False
-        
-        presentation_data = create_new_presentation(content_data)
+        access_token = load_token()
+        if not authenticated(access_token):
+            if not authenticate():
+                logger.error("Authentication failed")
+                return False
+        else:
+            AUTH_TOKEN = access_token
+            logger.info("Using existing authentication token")
+            
+        presentation_data = create_new_presentation()
         if not presentation_data:
             return False
         
@@ -920,8 +947,8 @@ def generate_presentation(content_data, instructions="", image_paths=None):
         logger.info("Generating shareable link")
         shareable_link = generate_shareable_link()
         if not shareable_link:
-            shareable_link = f"https://app.getalai.com/view/{PRESENTATION_ID}"
-            logger.warning(f"Using fallback shareable link: {shareable_link}")
+            logger.error(f"Could not generate shareable link")
+            return False
         
         logger.info("Presentation generation complete")
         save_responses_to_file()
@@ -940,10 +967,10 @@ if __name__ == "__main__":
         logger.setLevel(logging.DEBUG)
         websocket.enableTrace(True)
     
-    content = scrape_webpage(args.url, FIRE_CRAWL_API_KEY)
+    content, dir = scrape_webpage(args.url, FIRE_CRAWL_API_KEY)
     
     instructions = """Create a professional presentation with exactly 5 slides, designed for a business audience. 
-    Structure the content as follows: Slide 1 is an engaging title slide with a concise subtitle summarizing the topic; 
+    Structure the content as follows: Slide 1 is an engaging title slide with a concise subtitle summarizing the topic without host name; 
     Slides 2-4 are content slides with key points derived from the provided data; 
     Slide 5 is a conclusion slide with actionable insights or a summary. 
     Use bullet points or tables for clarity, ensuring visually appealing formats with consistent fonts and spacing. 
@@ -954,7 +981,7 @@ if __name__ == "__main__":
     Apply a cohesive color scheme (e.g., corporate blues or neutrals) and minimal animations to enhance professionalism. 
     Ensure each slide is complete, self-contained, and balanced in content and design."""
 
-    image_dir = "scraped_data/images"
+    image_dir = f"{dir}/images"
     image_paths = [os.path.join(image_dir, filename) for filename in os.listdir(image_dir) 
               if os.path.isfile(os.path.join(image_dir, filename)) 
               and filename.lower().endswith(('.jpg', '.jpeg'))]

@@ -3,6 +3,10 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+scraped_data
+auth_token.txt
+presentation_generator.log
+
 # C extensions
 *.so
 
